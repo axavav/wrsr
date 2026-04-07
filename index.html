@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Геометрический Оптимизатор v11</title>
+    <style>
+        body, html { margin: 0; padding: 0; overflow: hidden; font-family: sans-serif; height: 100%; background: #f0f0f0; }
+        #menu { 
+            position: absolute; top: 10px; left: 10px; 
+            background: rgba(255, 255, 255, 0.95); padding: 15px; 
+            border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); 
+            z-index: 100; width: 280px; max-height: 95vh; overflow-y: auto; 
+        }
+        canvas { display: block; background: #fff; touch-action: none; }
+        .btn { 
+            display: block; width: 100%; margin-bottom: 6px; padding: 10px; 
+            cursor: pointer; border: 1px solid #ccc; border-radius: 6px; font-weight: bold; 
+            background: #fff; transition: 0.2s;
+        }
+        .active { background: #2196F3 !important; color: white; border-color: #0d47a1; }
+        .confirm { background: #4CAF50 !important; color: white; display: none; border: none; }
+        .undo-btn { background: #ffeb3b !important; border: 2px solid #fbc02d; margin-top: 10px; }
+        
+        #sumDisplay { color: #d81b60; font-size: 22px; font-weight: bold; text-align: center; margin: 10px 0; min-height: 26px; }
+        .point-item { font-size: 13px; margin: 5px 0; padding: 5px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+        .point-item input { width: 55px; padding: 2px; border: 1px solid #ccc; }
+        
+        .group-item { background: #e3f2fd; margin-top: 5px; padding: 8px; border-radius: 6px; font-size: 13px; border-left: 4px solid #2196F3; }
+        .group-len { font-weight: bold; color: #d81b60; float: right; }
+        
+        label { font-size: 10px; font-weight: bold; display: block; margin-top: 10px; color: #666; text-transform: uppercase; }
+    </style>
+</head>
+<body>
+
+<div id="menu">
+    <button class="btn mode-btn" onclick="setMode('fuel', this)">Экономия топлива</button>
+    <button class="btn mode-btn" onclick="setMode('mat', this)">Экономия материалов</button>
+    <button id="btn-confirm" class="btn confirm" onclick="confirmGroup()">ПОДТВЕРДИТЬ (&lt;-&gt;)</button>
+    <button class="btn mode-btn" onclick="setMode('connect', this)">Соединение точек</button>
+    <button class="btn mode-btn" onclick="setMode('sum', this)">Сумма длин (Син/Зел)</button>
+    
+    <div id="sumDisplay"></div>
+
+    <label>Прозрачность фона</label>
+    <input type="range" id="opacityRange" min="0" max="1" step="0.1" value="1" style="width:100%">
+    <label>Загрузить фото</label>
+    <input type="file" id="bgUpload" accept="image/*" style="width:100%; margin-bottom:10px;">
+    
+    <button class="btn undo-btn" onclick="undo()">↩ ОТМЕНИТЬ</button>
+    
+    <div id="pointsList"></div>
+    <div id="groupsList" style="margin-top:15px;"></div>
+</div>
+
+<canvas id="cvs"></canvas>
+
+<script>
+const canvas = document.getElementById('cvs');
+const ctx = canvas.getContext('2d');
+const pointsListDiv = document.getElementById('pointsList');
+const groupsListDiv = document.getElementById('groupsList');
+const sumDisplay = document.getElementById('sumDisplay');
+
+let points = [], lines = [], groups = [], history = [];
+let mode = null, selected = [], clickedLines = [], dragged = null;
+let bgImage = null, bgOpacity = 1;
+
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+function setMode(newMode, el) {
+    mode = (mode === newMode) ? null : newMode;
+    selected = [];
+    document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+    if (mode && el) el.classList.add('active');
+    document.getElementById('btn-confirm').style.display = (mode === 'mat') ? 'block' : 'none';
+    draw();
+}
+
+const dist = (p1, p2) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
+
+function getFermatPoint(A, B, C) {
+    const d = dist;
+    const ang = (p1, v, p2) => {
+        const a=d(v,p1), b=d(v,p2), c=d(p1,p2);
+        if(a*b === 0) return 0;
+        return Math.acos(Math.max(-1, Math.min(1, (a*a+b*b-c*c)/(2*a*b))));
+    };
+    if (ang(B,A,C) >= 2.094) return {x: A.x, y: A.y};
+    if (ang(A,B,C) >= 2.094) return {x: B.x, y: B.y};
+    if (ang(A,C,B) >= 2.094) return {x: C.x, y: C.y};
+
+    const getEqui = (p1, p2, pRef) => {
+        const dx = p2.x - p1.x, dy = p2.y - p1.y;
+        const s32 = Math.sqrt(3)/2;
+        const m = {x: (p1.x+p2.x)/2, y: (p1.y+p2.y)/2};
+        const c1 = {x: m.x - dy*s32, y: m.y + dx*s32}, c2 = {x: m.x + dy*s32, y: m.y - dx*s32};
+        return d(c1, pRef) > d(c2, pRef) ? c1 : c2;
+    };
+    const E1 = getEqui(A, B, C), E2 = getEqui(B, C, A);
+    const intersect = (p1, p2, p3, p4) => {
+        const den = (p4.y-p3.y)*(p2.x-p1.x)-(p4.x-p3.x)*(p2.y-p1.y);
+        if(Math.abs(den) < 0.1) return {x: p1.x, y: p1.y};
+        const ua = ((p4.x-p3.x)*(p1.y-p3.y)-(p4.y-p3.y)*(p1.x-p3.x))/den;
+        return {x: p1.x + ua*(p2.x-p1.x), y: p1.y + ua*(p2.y-p1.y)};
+    };
+    return intersect(A, E2, C, E1);
+}
+
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (bgImage) {
+        ctx.globalAlpha = bgOpacity;
+        const r = Math.min(canvas.width/bgImage.width, canvas.height/bgImage.height);
+        ctx.drawImage(bgImage, (canvas.width-bgImage.width*r)/2, (canvas.height-bgImage.height*r)/2, bgImage.width*r, bgImage.height*r);
+        ctx.globalAlpha = 1.0;
+    }
+
+    // Синие и Зеленые линии
+    lines.forEach(l => {
+        ctx.beginPath(); ctx.moveTo(l.p1.x, l.p1.y); ctx.lineTo(l.p2.x, l.p2.y);
+        const isSel = clickedLines.includes(l);
+        ctx.strokeStyle = isSel ? 'red' : l.color;
+        ctx.lineWidth = isSel ? 5 : 2;
+        ctx.stroke();
+    });
+
+    groupsListDiv.innerHTML = '<strong>Расход (Черные):</strong>';
+    
+    // Черные линии групп
+    groups.forEach((g) => {
+        ctx.strokeStyle = '#000'; ctx.lineWidth = 2.5;
+        let totalLen = 0;
+        let labels = g.map(p => p.label).join('');
+
+        if (g.length === 3) {
+            const F = getFermatPoint(g[0], g[1], g[2]);
+            g.forEach(p => { 
+                ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(F.x, F.y); ctx.stroke(); 
+                totalLen += dist(p, F);
+            });
+        } else if (g.length === 4) {
+            const s = sortPoints(g);
+            const build = (p0, p1, p2, p3) => {
+                let s1 = {x: (p0.x+p1.x)/2, y: (p0.y+p1.y)/2}, s2 = {x: (p2.x+p3.x)/2, y: (p2.y+p3.y)/2};
+                for(let i=0; i<10; i++) { s1 = getFermatPoint(p0, p1, s2); s2 = getFermatPoint(p2, p3, s1); }
+                return {s1, s2, len: dist(p0,s1)+dist(p1,s1)+dist(s1,s2)+dist(s2,p2)+dist(s2,p3)};
+            };
+            const b1 = build(s[0], s[1], s[2], s[3]), b2 = build(s[1], s[2], s[3], s[0]);
+            const best = b1.len < b2.len ? b1 : b2;
+            const p = b1.len < b2.len ? [s[0], s[1], s[2], s[3]] : [s[1], s[2], s[3], s[0]];
+            [[p[0],best.s1],[p[1],best.s1],[best.s1,best.s2],[best.s2,p[2]],[best.s2,p[3]]].forEach(pair => {
+                ctx.beginPath(); ctx.moveTo(pair[0].x, pair[0].y); ctx.lineTo(pair[1].x, pair[1].y); ctx.stroke();
+            });
+            totalLen = best.len;
+        }
+        const div = document.createElement('div'); div.className = 'group-item';
+        div.innerHTML = `${labels}: <span class="group-len">${Math.round(totalLen)}</span>`;
+        groupsListDiv.appendChild(div);
+    });
+
+    points.forEach(p => {
+        ctx.beginPath(); ctx.arc(p.x, p.y, 8, 0, Math.PI*2);
+        ctx.fillStyle = selected.includes(p) ? '#FF9800' : '#2196F3';
+        ctx.fill(); ctx.fillStyle = '#000'; ctx.font = "bold 14px Arial";
+        ctx.fillText(p.label, p.x + 12, p.y - 12);
+    });
+    updatePointsUI();
+}
+
+function sortPoints(pts) {
+    const c = pts.reduce((a, b) => ({x: a.x + b.x/4, y: a.y + b.y/4}), {x:0, y:0});
+    return [...pts].sort((a, b) => Math.atan2(a.y - c.y, a.x - c.x) - Math.atan2(b.y - c.y, b.x - c.x));
+}
+
+function updatePointsUI() {
+    pointsListDiv.innerHTML = '<strong>Координаты:</strong>';
+    points.forEach((p, i) => {
+        const div = document.createElement('div'); div.className = 'point-item';
+        div.innerHTML = `<span>${p.label}</span>
+        <input type="number" value="${Math.round(p.x)}" oninput="points[${i}].x=Number(this.value);draw()">
+        <input type="number" value="${Math.round(p.y)}" oninput="points[${i}].y=Number(this.value);draw()">`;
+        pointsListDiv.appendChild(div);
+    });
+}
+
+function startAction(e) {
+    const r = canvas.getBoundingClientRect();
+    const x = (e.clientX || (e.touches && e.touches[0].clientX)) - r.left;
+    const y = (e.clientY || (e.touches && e.touches[0].clientY)) - r.top;
+    const hp = points.find(p => dist(p, {x, y}) < 20);
+
+    if (mode === 'sum') {
+        const hl = lines.find(l => distToSeg({x,y}, l.p1, l.p2) < 15);
+        if (hl) {
+            const i = clickedLines.indexOf(hl);
+            if (i > -1) clickedLines.splice(i, 1); else clickedLines.push(hl);
+            let t = clickedLines.reduce((s, l) => s + dist(l.p1, l.p2), 0);
+            sumDisplay.innerText = t > 0 ? "Σ = " + Math.round(t) : "";
+            draw(); return;
+        }
+    }
+
+    if (hp) {
+        dragged = hp;
+        if (mode) {
+            if (!selected.includes(hp)) {
+                selected.push(hp);
+                if (mode === 'fuel') { save(); selected.forEach(p => { if(p!==hp) lines.push({p1:p, p2:hp, color:'green'}); }); }
+                if (mode === 'connect' && selected.length === 2) { 
+                    save(); lines.push({p1:selected[0], p2:selected[1], color:'blue'}); selected = []; 
+                }
+            }
+        }
+        window.addEventListener('mousemove', drag); window.addEventListener('mouseup', stop);
+        window.addEventListener('touchmove', drag, {passive: false}); window.addEventListener('touchend', stop);
+    } else if (!mode) {
+        save(); points.push({x, y, label: String.fromCharCode(65 + points.length)});
+    }
+    draw();
+}
+
+function drag(e) {
+    if (!dragged) return;
+    const ev = e.touches ? e.touches[0] : e;
+    const r = canvas.getBoundingClientRect();
+    dragged.x = ev.clientX - r.left; dragged.y = ev.clientY - r.top;
+    draw();
+}
+function stop() { dragged = null; }
+function confirmGroup() { if (selected.length >= 2) { save(); groups.push([...selected]); selected = []; draw(); } }
+function save() { history.push(JSON.stringify({points, lines, groups})); if(history.length>30) history.shift(); }
+function undo() { if(history.length>0) { const s = JSON.parse(history.pop()); points=s.points; lines=s.lines; groups=s.groups; clickedLines=[]; sumDisplay.innerText=""; draw(); } }
+
+function distToSeg(p, v, w) {
+    const l2 = Math.pow(dist(v, w), 2);
+    if (l2 === 0) return dist(p, v);
+    let t = Math.max(0, Math.min(1, ((p.x-v.x)*(w.x-v.x)+(p.y-v.y)*(w.y-v.y))/l2));
+    return dist(p, {x: v.x+t*(w.x-v.x), y: v.y+t*(w.y-v.y)});
+}
+
+document.getElementById('bgUpload').onchange = e => {
+    const reader = new FileReader();
+    reader.onload = ev => { const img = new Image(); img.onload = () => { bgImage = img; draw(); }; img.src = ev.target.result; };
+    reader.readAsDataURL(e.target.files[0]);
+};
+document.getElementById('opacityRange').oninput = e => { bgOpacity = e.target.value; draw(); };
+canvas.addEventListener('mousedown', startAction);
+canvas.addEventListener('touchstart', e => { e.preventDefault(); startAction(e); });
+window.addEventListener('resize', () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; draw(); });
+</script>
+</body>
+</html>
