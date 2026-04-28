@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Satellite Tracker Fix</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #001; color: white; font-family: sans-serif; }
+        #ui { position: absolute; top: 10px; left: 10px; z-index: 10; background: rgba(0,0,0,0.85); padding: 15px; border-radius: 8px; width: 280px; border: 1px solid #444; }
+        textarea { width: 100%; height: 60px; background: #111; color: #0f0; border: 1px solid #555; font-size: 10px; margin-bottom: 5px; }
+        .controls { margin-top: 10px; font-size: 13px; }
+        .sat-item { display: flex; justify-content: space-between; padding: 4px; background: #222; margin-bottom: 2px; }
+        button { cursor: pointer; background: #333; color: white; border: 1px solid #555; padding: 5px; width: 100%; }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <h3 style="margin-top:0">TLE Спутники</h3>
+    <textarea id="tleInput" placeholder="Name&#10;Line 1&#10;Line 2"></textarea>
+    <button onclick="addSatellite()">Добавить в реальном времени</button>
+    <div id="satList" style="margin-top:10px"></div>
+    <div class="controls">
+        Скорость: <span id="speedVal">1</span>x
+        <input type="range" id="timeScale" min="0" max="2000" value="1" style="width:100%">
+        <div id="clock" style="font-size: 11px; color: #aaa; margin-top:5px"></div>
+    </div>
+</div>
+
+<script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/satellite.js/4.0.0/satellite.min.js"></script>
+
+<script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    const SCENE_SCALE = 5 / 6371;
+    let scene, camera, renderer, controls, earth;
+    let satellites = [];
+    let virtualTime = new Date();
+
+    function init() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x000005);
+
+        camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 5000);
+        camera.position.set(15, 12, 15);
+
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+
+        // Свет со всех сторон, чтобы не было "черного экрана"
+        scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+        const sun = new THREE.DirectionalLight(0xffffff, 2);
+        sun.position.set(10, 10, 10);
+        scene.add(sun);
+
+        const loader = new THREE.TextureLoader();
+        loader.setCrossOrigin('anonymous');
+
+        // Создание Земли
+        const geo = new THREE.SphereGeometry(5, 64, 64);
+        const mat = new THREE.MeshPhongMaterial({
+            map: loader.load('https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg'),
+            bumpMap: loader.load('https://unpkg.com/three-globe/example/img/earth-topology.png'),
+            bumpScale: 0.05
+        });
+        earth = new THREE.Mesh(geo, mat);
+        scene.add(earth);
+
+        // Луна
+        const moonGeo = new THREE.SphereGeometry(1.36, 32, 32);
+        const moonMat = new THREE.MeshPhongMaterial({
+            map: loader.load('https://unpkg.com/three-globe/example/img/moon-surface.jpg')
+        });
+        const moon = new THREE.Mesh(moonGeo, moonMat);
+        const moonOrbit = new THREE.Group();
+        scene.add(moonOrbit);
+        moonOrbit.add(moon);
+        moon.position.set(300, 0, 0); // Условное расстояние для видимости
+        window.moonOrbit = moonOrbit;
+
+        window.addEventListener('resize', onWindowResize);
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    window.addSatellite = function() {
+        const text = document.getElementById('tleInput').value.trim().split('\n');
+        if (text.length < 2) return;
+        
+        const name = text.length === 3 ? text[0] : "SAT";
+        const l1 = text.length === 3 ? text[1] : text[0];
+        const l2 = text.length === 3 ? text[2] : text[1];
+
+        const satrec = satellite.twoline2satrec(l1, l2);
+        const dot = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 8), new THREE.MeshBasicMaterial({color: 0x00ff00}));
+        scene.add(dot);
+
+        const lineMat = new THREE.LineBasicMaterial({color: 0x00ffff, transparent: true, opacity: 0.4});
+        const lineGeo = new THREE.BufferGeometry();
+        const line = new THREE.Line(lineGeo, lineMat);
+        scene.add(line);
+
+        satellites.push({ name, satrec, mesh: dot, line, id: Date.now() });
+        updateUI();
+    };
+
+    window.removeSat = (id) => {
+        const s = satellites.find(x => x.id === id);
+        scene.remove(s.mesh); scene.remove(s.line);
+        satellites = satellites.filter(x => x.id !== id);
+        updateUI();
+    };
+
+    function updateUI() {
+        document.getElementById('satList').innerHTML = satellites.map(s => `
+            <div class="sat-item"><span>${s.name}</span><span onclick="removeSat(${s.id})" style="cursor:pointer">❌</span></div>
+        `).join('');
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        const scale = parseFloat(document.getElementById('timeScale').value);
+        document.getElementById('speedVal').innerText = scale;
+        
+        virtualTime = new Date(virtualTime.getTime() + (16 * scale));
+        document.getElementById('clock').innerText = virtualTime.toUTCString();
+
+        const gstime = satellite.gstime(virtualTime);
+        earth.rotation.y = gstime;
+
+        if(window.moonOrbit) window.moonOrbit.rotation.y += 0.0001 * scale;
+
+        satellites.forEach(sat => {
+            const pv = satellite.propagate(sat.satrec, virtualTime);
+            if (pv.position) {
+                sat.mesh.position.set(pv.position.y * SCENE_SCALE, pv.position.z * SCENE_SCALE, pv.position.x * SCENE_SCALE);
+                
+                // Отрисовка пути (на 1 виток назад)
+                const path = [];
+                for(let i=0; i<100; i++) {
+                    const t = new Date(virtualTime.getTime() - i * 100000);
+                    const p = satellite.propagate(sat.satrec, t).position;
+                    if(p) path.push(new THREE.Vector3(p.y * SCENE_SCALE, p.z * SCENE_SCALE, p.x * SCENE_SCALE));
+                }
+                sat.line.geometry.setFromPoints(path);
+            }
+        });
+
+        controls.update();
+        renderer.render(scene, camera);
+    }
+
+    init();
+    animate();
+    
+    // Предзагрузка МКС
+    document.getElementById('tleInput').value = "ISS (ZARYA)\n1 25544U 98067A   24119.57531743  .00016717  00000-0  30182-3 0  9993\n2 25544  51.6416 140.7483 0004481 245.5448 163.4255 15.49964144450531";
+    addSatellite();
+
+</script>
+</body>
+</html>
